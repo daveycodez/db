@@ -88,8 +88,14 @@ export class CollectionSubscriber<
       this.collection.config.getKey
     )
 
+    // Do not provide the callback that loads more data
+    // if there's no more data to load
+    // otherwise we end up in an infinite loop trying to load more data
     const dataLoader = sentChanges > 0 ? callback : undefined
 
+    // We need to schedule a graph run even if there's no data to load
+    // because we need to mark the collection as ready if it's not already
+    // and that's only done in `scheduleGraphRun`
     this.collectionConfigBuilder.scheduleGraphRun(dataLoader, {
       alias: this.alias,
     })
@@ -211,10 +217,13 @@ export class CollectionSubscriber<
 
     const subscriptionWithLoader = subscription as SubscriptionWithLoader
 
-    const loadMoreCallback = (subscriptionWithLoader[loadMoreCallbackSymbol] ??=
-      this.loadMoreIfNeeded.bind(this, subscription))
+    subscriptionWithLoader[loadMoreCallbackSymbol] ??=
+      this.loadMoreIfNeeded.bind(this, subscription)
 
-    this.sendChangesToPipeline(trackedChanges, loadMoreCallback)
+    this.sendChangesToPipeline(
+      trackedChanges,
+      subscriptionWithLoader[loadMoreCallbackSymbol]
+    )
   }
 
   // Loads the next `n` items from the collection
