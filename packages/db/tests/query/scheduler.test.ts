@@ -506,12 +506,16 @@ describe(`live query scheduler`, () => {
 
     const maybeRunGraphSpy = vi
       .spyOn(builder, `maybeRunGraph`)
-      .mockImplementation((_config, _syncState, combinedLoader) => {
+      .mockImplementation((combinedLoader) => {
         combinedLoader?.()
       })
 
-    builder.scheduleGraphRun(config, syncState, loader, { contextId })
-    builder.scheduleGraphRun(config, syncState, loader, { contextId })
+    // Set instance properties since this test calls scheduleGraphRun directly
+    builder.currentSyncConfig = config
+    builder.currentSyncState = syncState
+
+    builder.scheduleGraphRun(loader, { contextId })
+    builder.scheduleGraphRun(loader, { contextId })
 
     transactionScopedScheduler.flush(contextId)
 

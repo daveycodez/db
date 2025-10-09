@@ -4,33 +4,23 @@
 export type SchedulerContextId = string | symbol
 
 /**
- * Internal representation of a job queued by the scheduler.
- * Mutable `state` accumulates information before `run` executes the work.
+ * Options for {@link Scheduler.schedule}. Jobs are identified by `jobId` within a context
+ * and may declare dependencies.
  */
-interface SchedulerEntry<TState> {
-  state: TState
+interface ScheduleOptions {
+  contextId?: SchedulerContextId
+  jobId: unknown
+  dependencies?: Iterable<unknown>
   run: () => void
 }
 
 /**
- * Options for {@link Scheduler.schedule}. Jobs are identified by `jobId` within a context
- * and may declare dependencies. `createEntry` is called once; `updateEntry` merges state.
- */
-interface ScheduleOptions<TState> {
-  contextId?: SchedulerContextId
-  jobId: unknown
-  dependencies?: Iterable<unknown>
-  createEntry: () => SchedulerEntry<TState>
-  updateEntry?: (entry: SchedulerEntry<TState>) => void
-}
-
-/**
- * State per context. Queue preserves order, entries hold jobs, dependencies track
+ * State per context. Queue preserves order, jobs hold run functions, dependencies track
  * prerequisites, and completed records which jobs have run during the current flush.
  */
 interface SchedulerContextState {
   queue: Array<unknown>
-  entries: Map<unknown, SchedulerEntry<any>>
+  jobs: Map<unknown, () => void>
   dependencies: Map<unknown, Set<unknown>>
   completed: Set<unknown>
 }
@@ -39,13 +29,14 @@ interface SchedulerContextState {
  * Scoped scheduler that coalesces work by context and job.
  *
  * - **context** (e.g. transaction id) defines the batching boundary; work is queued until flushed.
- * - **job id** deduplicates work within a context; subsequent schedules update the entry.
+ * - **job id** deduplicates work within a context; scheduling the same job replaces the previous run function.
  * - Without a context id, work executes immediately.
  *
- * Each entry has mutable state so callers can merge data before `run()` executes.
+ * Callers manage their own state; the scheduler only orchestrates execution order.
  */
 export class Scheduler {
   private contexts = new Map<SchedulerContextId, SchedulerContextState>()
+  private clearListeners = new Set<(contextId: SchedulerContextId) => void>()
 
   /**
    * Get or create the state bucket for a context.
@@ -57,7 +48,7 @@ export class Scheduler {
     if (!context) {
       context = {
         queue: [],
-        entries: new Map(),
+        jobs: new Map(),
         dependencies: new Map(),
         completed: new Set(),
       }
@@ -69,44 +60,34 @@ export class Scheduler {
   /**
    * Schedule work. Without a context id, executes immediately.
    * Otherwise queues the job to be flushed once dependencies are satisfied.
+   * Scheduling the same jobId again replaces the previous run function.
    */
-  schedule<TState>({
-    contextId,
-    jobId,
-    dependencies,
-    createEntry,
-    updateEntry,
-  }: ScheduleOptions<TState>): void {
+  schedule({ contextId, jobId, dependencies, run }: ScheduleOptions): void {
     if (typeof contextId === `undefined`) {
-      const entry = createEntry()
-      updateEntry?.(entry)
-      entry.run()
+      run()
       return
     }
 
     const context = this.getOrCreateContext(contextId)
 
-    let entry = context.entries.get(jobId) as SchedulerEntry<TState> | undefined
-    if (!entry) {
-      entry = createEntry()
-      context.entries.set(jobId, entry)
+    // If this is a new job, add it to the queue
+    if (!context.jobs.has(jobId)) {
       context.queue.push(jobId)
     }
 
-    updateEntry?.(entry)
+    // Store or replace the run function
+    context.jobs.set(jobId, run)
 
+    // Update dependencies
     if (dependencies) {
-      const depSet = new Set<unknown>()
-      for (const dep of dependencies) {
-        if (dep !== jobId) {
-          depSet.add(dep)
-        }
-      }
+      const depSet = new Set<unknown>(dependencies)
+      depSet.delete(jobId)
       context.dependencies.set(jobId, depSet)
     } else if (!context.dependencies.has(jobId)) {
       context.dependencies.set(jobId, new Set())
     }
 
+    // Clear completion status since we're rescheduling
     context.completed.delete(jobId)
   }
 
@@ -118,7 +99,7 @@ export class Scheduler {
     const context = this.contexts.get(contextId)
     if (!context) return
 
-    const { queue, entries, dependencies, completed } = context
+    const { queue, jobs, dependencies, completed } = context
 
     while (queue.length > 0) {
       let ranThisPass = false
@@ -126,25 +107,31 @@ export class Scheduler {
 
       for (let i = 0; i < jobsThisPass; i++) {
         const jobId = queue.shift()!
-        const entry = entries.get(jobId)
-        if (!entry) {
+        const run = jobs.get(jobId)
+        if (!run) {
           dependencies.delete(jobId)
           completed.delete(jobId)
           continue
         }
 
         const deps = dependencies.get(jobId)
-        const ready =
-          !deps ||
-          deps.size === 0 ||
-          [...deps].every((dep) => dep === jobId || completed.has(dep))
+        let ready = !deps
+        if (deps) {
+          ready = true
+          for (const dep of deps) {
+            if (dep !== jobId && !completed.has(dep)) {
+              ready = false
+              break
+            }
+          }
+        }
 
         if (ready) {
-          entries.delete(jobId)
+          jobs.delete(jobId)
           dependencies.delete(jobId)
           // Run the job. If it throws, we don't mark it complete, allowing the
           // error to propagate while maintaining scheduler state consistency.
-          entry.run()
+          run()
           completed.add(jobId)
           ranThisPass = true
         } else {
@@ -176,13 +163,20 @@ export class Scheduler {
   /** Clear all scheduled jobs for a context. */
   clear(contextId: SchedulerContextId): void {
     this.contexts.delete(contextId)
+    // Notify listeners that this context was cleared
+    this.clearListeners.forEach((listener) => listener(contextId))
+  }
+
+  /** Register a listener to be notified when a context is cleared. */
+  onClear(listener: (contextId: SchedulerContextId) => void): () => void {
+    this.clearListeners.add(listener)
+    return () => this.clearListeners.delete(listener)
   }
 
   /** Check if a context has pending jobs. */
   hasPendingJobs(contextId: SchedulerContextId): boolean {
     const context = this.contexts.get(contextId)
-    if (!context) return false
-    return context.entries.size > 0
+    return !!context && context.jobs.size > 0
   }
 
   /** Remove a single job from a context and clean up its dependencies. */
@@ -190,12 +184,12 @@ export class Scheduler {
     const context = this.contexts.get(contextId)
     if (!context) return
 
-    context.entries.delete(jobId)
+    context.jobs.delete(jobId)
     context.dependencies.delete(jobId)
     context.completed.delete(jobId)
     context.queue = context.queue.filter((id) => id !== jobId)
 
-    if (context.entries.size === 0) {
+    if (context.jobs.size === 0) {
       this.contexts.delete(contextId)
     }
   }
