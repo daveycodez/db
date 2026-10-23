@@ -22,6 +22,7 @@ import type {
   ChangeMessageOrDeleteKeyMessage,
   CleanupFn,
   CollectionConfig,
+  IsSubsetLoadedFn,
   LoadSubsetFn,
   LoadSubsetOptions,
   LoadSubsetRequestResult,
@@ -83,6 +84,7 @@ export class CollectionSyncManager<
   public syncLoadSubsetFn: LoadSubsetFn | null = null
   public syncUnloadSubsetFn: ((options: LoadSubsetOptions) => void) | null =
     null
+  public syncIsSubsetLoadedFn: IsSubsetLoadedFn | null = null
 
   private pendingLoadSubsetPromises: Set<Promise<unknown>> = new Set()
   private activeLoadSubsetOperation: LoadSubsetOperation | undefined
@@ -383,6 +385,8 @@ export class CollectionSyncManager<
 
       // Store unloadSubset function if provided
       this.syncUnloadSubsetFn = syncRes?.unloadSubset ?? null
+
+      this.syncIsSubsetLoadedFn = syncRes?.isSubsetLoaded ?? null
 
       // Validate: on-demand mode requires a loadSubset function
       if (this.syncMode === `on-demand` && !this.syncLoadSubsetFn) {
@@ -1000,6 +1004,7 @@ export class CollectionSyncManager<
     this.syncCleanupFn = null
     this.syncLoadSubsetFn = null
     this.syncUnloadSubsetFn = null
+    this.syncIsSubsetLoadedFn = null
 
     let cleanupResult: true | Promise<void> = true
     let cleanupFailure: { error: unknown } | undefined
