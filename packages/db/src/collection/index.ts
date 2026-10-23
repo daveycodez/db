@@ -1301,7 +1301,11 @@ function buildCompareOptionsFromConfig(
   }
 
   if (options.stringSort === `custom`) {
-    return { stringSort: `custom`, compare: options.compare }
+    return {
+      stringSort: `custom`,
+      compare: options.compare,
+      ...(options.trustProviderOrder && { trustProviderOrder: true }),
+    }
   }
 
   return {

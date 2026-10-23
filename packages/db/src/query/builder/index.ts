@@ -717,6 +717,9 @@ export class BaseQueryBuilder<TContext extends Context = Context> {
               ? {
                   stringSort: `custom`,
                   compare: options.compare,
+                  ...(options.trustProviderOrder && {
+                    trustProviderOrder: true,
+                  }),
                 }
               : {
                   stringSort: options.stringSort,
