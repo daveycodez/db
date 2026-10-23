@@ -102,7 +102,8 @@ export function getLoadSubsetDemandKey(
     !options.orderBy?.length &&
     options.limit === undefined &&
     (options.offset === undefined || options.offset === 0) &&
-    options.cursor === undefined
+    options.cursor === undefined &&
+    !options.relations?.length
   ) {
     // Query-db uses its base query key for the one unconstrained demand. An
     // owner-only option must not create another cache entry for the same data.
@@ -154,6 +155,33 @@ export function getLoadSubsetDemandKey(
       )
     }
     result.cursor = cursor
+  }
+
+  if (options.relations?.length) {
+    // A relation-filtered demand asks for fewer rows than the same demand
+    // without it: never the same key.
+    result.relations = options.relations.map((relation, index) => ({
+      quantifier: relation.quantifier,
+      collectionId: relation.collectionId,
+      parent: canonicalizeRuntimeValue(
+        relation.on.parent,
+        `loadSubset.relations[${index}].on.parent`,
+        seen,
+      ),
+      child: canonicalizeRuntimeValue(
+        relation.on.child,
+        `loadSubset.relations[${index}].on.child`,
+        seen,
+      ),
+      ...(relation.where && {
+        where: canonicalizeExpression(
+          relation.where,
+          `loadSubset.relations[${index}].where`,
+          seen,
+          `exact-output`,
+        ),
+      }),
+    }))
   }
 
   return JSON.stringify(result) as DemandKey

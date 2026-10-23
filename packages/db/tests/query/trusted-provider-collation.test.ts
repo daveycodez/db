@@ -7,7 +7,10 @@ import { compileSingleRowExpression } from '../../src/query/compiler/evaluators.
 import { getLoadSubsetDemandKey } from '../../src/query/ir-stable-identity.js'
 import { PropRef, Value } from '../../src/query/ir.js'
 import type { BasicExpression } from '../../src/query/ir.js'
-import type { CustomStringCollation, LoadSubsetOptions } from '../../src/types.js'
+import type {
+  CustomStringCollation,
+  LoadSubsetOptions,
+} from '../../src/types.js'
 
 type Row = { id: number; label: string; keep: boolean }
 

@@ -323,6 +323,7 @@ export class CollectionSubscriber<
     // values bigger than what we've sent don't need to be sent because they can't affect the topK
     const subscription = this.collection.subscribeChanges(sendChangesInRange, {
       whereExpression,
+      ...(orderByInfo.relations && { relations: orderByInfo.relations }),
       onStatusChange,
       onLoadSubsetError,
       deferAcquisition: this.defersAcquisition(),

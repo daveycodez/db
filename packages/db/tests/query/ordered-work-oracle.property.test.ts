@@ -196,7 +196,14 @@ let harnessId = 0
 // them into an empty object. Signals/subscriptions are ownership, while
 // refetch controls the attempt; none of the three changes demand identity.
 function requestFingerprint(options: LoadSubsetOptions): string {
-  const semantic = new Set([`where`, `orderBy`, `limit`, `offset`, `cursor`])
+  const semantic = new Set([
+    `where`,
+    `orderBy`,
+    `limit`,
+    `offset`,
+    `cursor`,
+    `relations`,
+  ])
   for (const key of Reflect.ownKeys(options)) {
     if (
       !semantic.has(String(key)) &&
