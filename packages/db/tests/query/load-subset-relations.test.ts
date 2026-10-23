@@ -208,50 +208,60 @@ describe(`relations hint on a joined-filter window`, () => {
     })
   }
 
-  for (const subquery of [false, true])
-    it(`waits for a slower joined side when the root answers synchronously${subquery ? ` (filter subquery)` : ``}`, async () => {
-      const { seekCollection, runCollection } = setup(true, true, 5)
-      const visibleRuns = new Query()
-        .from({ run: runCollection })
-        .where(({ run }) => not(eq(run.userId, `admin`)))
-        .select(({ run }) => ({ k: run.seekId }))
-        .distinct()
-      const live = createLiveQueryCollection({
-        query: (q) =>
-          subquery
-            ? q
-                .from({ seek: seekCollection })
-                .leftJoin({ visible: visibleRuns }, ({ seek, visible }) =>
-                  eq(seek.id, visible.k),
-                )
-                .where(({ visible }) => not(isUndefined(visible.k)))
-                .orderBy(({ seek }) => seek.updatedAt, `desc`)
-                .limit(3)
-                .select(({ seek }) => ({ id: seek.id }))
-            : q
-                .from({ seek: seekCollection })
-                .leftJoin({ run: runCollection }, ({ seek, run }) =>
-                  eq(seek.runId, run.id),
-                )
-                .where(({ run }) =>
-                  or(
-                    isUndefined(run.userId),
-                    not(inArray(run.userId, [`admin`])),
-                  ),
-                )
-                .orderBy(({ seek }) => seek.updatedAt, `desc`)
-                .limit(3)
-                .select(({ seek }) => ({ id: seek.id })),
-      })
-      await live.preload()
-      await new Promise((resolve) => setTimeout(resolve, 30))
-      expect(Array.from(live.values(), ({ id }) => id)).toEqual(
-        newestVisible.slice(0, 3),
-      )
-      await live.cleanup()
-      await seekCollection.cleanup()
-      await runCollection.cleanup()
+  it(`waits for a slower joined side when the root answers synchronously`, async () => {
+    const { seekCollection, runCollection } = setup(true, true, 5)
+    const live = createLiveQueryCollection({
+      query: (q) =>
+        q
+          .from({ seek: seekCollection })
+          .leftJoin({ run: runCollection }, ({ seek, run }) =>
+            eq(seek.runId, run.id),
+          )
+          .where(({ run }) =>
+            or(isUndefined(run.userId), not(inArray(run.userId, [`admin`]))),
+          )
+          .orderBy(({ seek }) => seek.updatedAt, `desc`)
+          .limit(3)
+          .select(({ seek }) => ({ id: seek.id })),
     })
+    await live.preload()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(Array.from(live.values(), ({ id }) => id)).toEqual(
+      newestVisible.slice(0, 3),
+    )
+    await live.cleanup()
+    await seekCollection.cleanup()
+    await runCollection.cleanup()
+  })
+
+  it(`waits for a slower filter subquery when the root answers synchronously`, async () => {
+    const { seekCollection, runCollection } = setup(true, true, 5)
+    const visibleRuns = new Query()
+      .from({ run: runCollection })
+      .where(({ run }) => not(eq(run.userId, `admin`)))
+      .select(({ run }) => ({ k: run.seekId }))
+      .distinct()
+    const live = createLiveQueryCollection({
+      query: (q) =>
+        q
+          .from({ seek: seekCollection })
+          .leftJoin({ visible: visibleRuns }, ({ seek, visible }) =>
+            eq(seek.id, visible.k),
+          )
+          .where(({ visible }) => not(isUndefined(visible.k)))
+          .orderBy(({ seek }) => seek.updatedAt, `desc`)
+          .limit(3)
+          .select(({ seek }) => ({ id: seek.id })),
+    })
+    await live.preload()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(Array.from(live.values(), ({ id }) => id)).toEqual(
+      newestVisible.slice(0, 3),
+    )
+    await live.cleanup()
+    await seekCollection.cleanup()
+    await runCollection.cleanup()
+  })
 
   it(`sends an existence check as a relation`, async () => {
     const { seekLoads, seekCollection, runCollection } = setup(true)
@@ -281,47 +291,47 @@ describe(`relations hint on a joined-filter window`, () => {
   })
 
   for (const synchronous of [false, true])
-  it(`pages an existence check over a filter subquery${synchronous ? `, answering synchronously` : ``}`, async () => {
-    const { seekLoads, delivered, seekCollection, runCollection } = setup(
-      true,
-      synchronous,
-    )
-    const visibleRuns = new Query()
-      .from({ run: runCollection })
-      .where(({ run }) => not(eq(run.userId, `admin`)))
-      .select(({ run }) => ({ k: run.seekId }))
-      .distinct()
-    const live = createLiveQueryCollection({
-      query: (q) =>
-        q
-          .from({ seek: seekCollection })
-          .leftJoin({ visible: visibleRuns }, ({ seek, visible }) =>
-            eq(seek.id, visible.k),
-          )
-          .where(({ visible }) => not(isUndefined(visible.k)))
-          .orderBy(({ seek }) => seek.updatedAt, `desc`)
-          .limit(3)
-          .select(({ seek }) => ({ id: seek.id })),
-    })
-    await live.preload()
+    it(`pages an existence check over a filter subquery${synchronous ? `, answering synchronously` : ``}`, async () => {
+      const { seekLoads, delivered, seekCollection, runCollection } = setup(
+        true,
+        synchronous,
+      )
+      const visibleRuns = new Query()
+        .from({ run: runCollection })
+        .where(({ run }) => not(eq(run.userId, `admin`)))
+        .select(({ run }) => ({ k: run.seekId }))
+        .distinct()
+      const live = createLiveQueryCollection({
+        query: (q) =>
+          q
+            .from({ seek: seekCollection })
+            .leftJoin({ visible: visibleRuns }, ({ seek, visible }) =>
+              eq(seek.id, visible.k),
+            )
+            .where(({ visible }) => not(isUndefined(visible.k)))
+            .orderBy(({ seek }) => seek.updatedAt, `desc`)
+            .limit(3)
+            .select(({ seek }) => ({ id: seek.id })),
+      })
+      await live.preload()
 
-    expect(Array.from(live.values(), ({ id }) => id)).toEqual(
-      newestVisible.slice(0, 3),
-    )
-    expect(seekLoads[0]?.limit).toBeDefined()
-    expect(seekLoads[0]!.relations).toEqual([
-      {
-        quantifier: `some`,
-        collectionId: runCollection.id,
-        on: { parent: [`id`], child: [`seekId`] },
-        where: expect.objectContaining({ name: `not` }),
-      },
-    ])
-    expect(delivered.size).toBeLessThanOrEqual(6)
-    await live.cleanup()
-    await seekCollection.cleanup()
-    await runCollection.cleanup()
-  })
+      expect(Array.from(live.values(), ({ id }) => id)).toEqual(
+        newestVisible.slice(0, 3),
+      )
+      expect(seekLoads[0]?.limit).toBeDefined()
+      expect(seekLoads[0]!.relations).toEqual([
+        {
+          quantifier: `some`,
+          collectionId: runCollection.id,
+          on: { parent: [`id`], child: [`seekId`] },
+          where: expect.objectContaining({ name: `not` }),
+        },
+      ])
+      expect(delivered.size).toBeLessThanOrEqual(6)
+      await live.cleanup()
+      await seekCollection.cleanup()
+      await runCollection.cleanup()
+    })
 
   it(`keys a relation-filtered demand apart from the same demand without it`, () => {
     const where = eq(new PropRef([`updatedAt`]), new Value(1))
