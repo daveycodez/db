@@ -46,7 +46,11 @@ function passesRelation(seek: Seek, relation: LoadSubsetRelation): boolean {
   return relation.quantifier === `some` ? matches : !matches
 }
 
-function setup(applyRelations: boolean) {
+function setup(
+  applyRelations: boolean,
+  synchronous = false,
+  joinedDelayMs = 0,
+) {
   const seekLoads: Array<LoadSubsetOptions> = []
   const delivered = new Set<number>()
   const seekCollection = createCollection<Seek>({
@@ -91,6 +95,7 @@ function setup(applyRelations: boolean) {
               write({ type: `insert`, value: { ...row } })
             }
             const receipt = commit()
+            if (synchronous) return receipt
             return receipt === true ? Promise.resolve() : receipt
           },
         }
@@ -110,12 +115,24 @@ function setup(applyRelations: boolean) {
             const where = options.where
               ? compileSingleRowExpression(options.where)
               : undefined
-            begin()
-            for (const run of runs) {
-              if (where && where(run) !== true) continue
-              write({ type: `insert`, value: { ...run } })
+            const answer = () => {
+              begin()
+              for (const run of runs) {
+                if (where && where(run) !== true) continue
+                write({ type: `insert`, value: { ...run } })
+              }
+              return commit()
             }
-            const receipt = commit()
+            if (joinedDelayMs > 0) {
+              return new Promise<void>((resolve) =>
+                setTimeout(() => {
+                  const receipt = answer()
+                  void (receipt === true ? resolve() : receipt.then(resolve))
+                }, joinedDelayMs),
+              )
+            }
+            const receipt = answer()
+            if (synchronous) return receipt
             return receipt === true ? Promise.resolve() : receipt
           },
         }
@@ -131,10 +148,17 @@ const newestVisible = seeks
   .map(({ id }) => id)
 
 describe(`relations hint on a joined-filter window`, () => {
-  for (const applyRelations of [true, false]) {
-    it(`pages a to-one filter whose provider ${applyRelations ? `applies` : `ignores`} the hint`, async () => {
-      const { seekLoads, delivered, seekCollection, runCollection } =
-        setup(applyRelations)
+  for (const [applyRelations, synchronous] of [
+    [true, false],
+    [false, false],
+    [true, true],
+    [false, true],
+  ] as const) {
+    it(`pages a to-one filter whose provider ${applyRelations ? `applies` : `ignores`} the hint${synchronous ? `, answering synchronously` : ``}`, async () => {
+      const { seekLoads, delivered, seekCollection, runCollection } = setup(
+        applyRelations,
+        synchronous,
+      )
       const live = createLiveQueryCollection({
         query: (q) =>
           q
@@ -184,6 +208,51 @@ describe(`relations hint on a joined-filter window`, () => {
     })
   }
 
+  for (const subquery of [false, true])
+    it(`waits for a slower joined side when the root answers synchronously${subquery ? ` (filter subquery)` : ``}`, async () => {
+      const { seekCollection, runCollection } = setup(true, true, 5)
+      const visibleRuns = new Query()
+        .from({ run: runCollection })
+        .where(({ run }) => not(eq(run.userId, `admin`)))
+        .select(({ run }) => ({ k: run.seekId }))
+        .distinct()
+      const live = createLiveQueryCollection({
+        query: (q) =>
+          subquery
+            ? q
+                .from({ seek: seekCollection })
+                .leftJoin({ visible: visibleRuns }, ({ seek, visible }) =>
+                  eq(seek.id, visible.k),
+                )
+                .where(({ visible }) => not(isUndefined(visible.k)))
+                .orderBy(({ seek }) => seek.updatedAt, `desc`)
+                .limit(3)
+                .select(({ seek }) => ({ id: seek.id }))
+            : q
+                .from({ seek: seekCollection })
+                .leftJoin({ run: runCollection }, ({ seek, run }) =>
+                  eq(seek.runId, run.id),
+                )
+                .where(({ run }) =>
+                  or(
+                    isUndefined(run.userId),
+                    not(inArray(run.userId, [`admin`])),
+                  ),
+                )
+                .orderBy(({ seek }) => seek.updatedAt, `desc`)
+                .limit(3)
+                .select(({ seek }) => ({ id: seek.id })),
+      })
+      await live.preload()
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      expect(Array.from(live.values(), ({ id }) => id)).toEqual(
+        newestVisible.slice(0, 3),
+      )
+      await live.cleanup()
+      await seekCollection.cleanup()
+      await runCollection.cleanup()
+    })
+
   it(`sends an existence check as a relation`, async () => {
     const { seekLoads, seekCollection, runCollection } = setup(true)
     const live = createLiveQueryCollection({
@@ -211,8 +280,12 @@ describe(`relations hint on a joined-filter window`, () => {
     await runCollection.cleanup()
   })
 
-  it(`pages an existence check over a filter subquery`, async () => {
-    const { seekLoads, delivered, seekCollection, runCollection } = setup(true)
+  for (const synchronous of [false, true])
+  it(`pages an existence check over a filter subquery${synchronous ? `, answering synchronously` : ``}`, async () => {
+    const { seekLoads, delivered, seekCollection, runCollection } = setup(
+      true,
+      synchronous,
+    )
     const visibleRuns = new Query()
       .from({ run: runCollection })
       .where(({ run }) => not(eq(run.userId, `admin`)))
