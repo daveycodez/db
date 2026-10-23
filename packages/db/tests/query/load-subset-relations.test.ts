@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createCollection } from '../../src/collection/index.js'
 import { BTreeIndex } from '../../src/index.js'
 import { createLiveQueryCollection } from '../../src/query/live-query-collection.js'
+import { Query } from '../../src/query/builder/index.js'
 import {
   eq,
   inArray,
@@ -15,7 +16,7 @@ import { PropRef, Value } from '../../src/query/ir.js'
 import type { LoadSubsetOptions, LoadSubsetRelation } from '../../src/types.js'
 
 type Seek = { id: number; updatedAt: number; runId: string }
-type Run = { id: string; userId: string }
+type Run = { id: string; seekId: number; userId: string }
 
 const seeks: Array<Seek> = Array.from({ length: 40 }, (_, id) => ({
   id,
@@ -24,6 +25,7 @@ const seeks: Array<Seek> = Array.from({ length: 40 }, (_, id) => ({
 }))
 const runs: Array<Run> = seeks.map(({ id }) => ({
   id: `run-${id}`,
+  seekId: id,
   userId: id % 5 === 0 ? `user` : `admin`,
 }))
 const runsById = new Map(runs.map((run) => [run.id, run]))
@@ -204,6 +206,45 @@ describe(`relations hint on a joined-filter window`, () => {
         on: { parent: [`runId`], child: [`id`] },
       },
     ])
+    await live.cleanup()
+    await seekCollection.cleanup()
+    await runCollection.cleanup()
+  })
+
+  it(`pages an existence check over a filter subquery`, async () => {
+    const { seekLoads, delivered, seekCollection, runCollection } = setup(true)
+    const visibleRuns = new Query()
+      .from({ run: runCollection })
+      .where(({ run }) => not(eq(run.userId, `admin`)))
+      .select(({ run }) => ({ k: run.seekId }))
+      .distinct()
+    const live = createLiveQueryCollection({
+      query: (q) =>
+        q
+          .from({ seek: seekCollection })
+          .leftJoin({ visible: visibleRuns }, ({ seek, visible }) =>
+            eq(seek.id, visible.k),
+          )
+          .where(({ visible }) => not(isUndefined(visible.k)))
+          .orderBy(({ seek }) => seek.updatedAt, `desc`)
+          .limit(3)
+          .select(({ seek }) => ({ id: seek.id })),
+    })
+    await live.preload()
+
+    expect(Array.from(live.values(), ({ id }) => id)).toEqual(
+      newestVisible.slice(0, 3),
+    )
+    expect(seekLoads[0]?.limit).toBeDefined()
+    expect(seekLoads[0]!.relations).toEqual([
+      {
+        quantifier: `some`,
+        collectionId: runCollection.id,
+        on: { parent: [`id`], child: [`seekId`] },
+        where: expect.objectContaining({ name: `not` }),
+      },
+    ])
+    expect(delivered.size).toBeLessThanOrEqual(6)
     await live.cleanup()
     await seekCollection.cleanup()
     await runCollection.cleanup()

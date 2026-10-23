@@ -34,6 +34,7 @@ import type { WindowOptions } from './types.js'
 import type { CompiledSingleRowExpression } from './evaluators.js'
 import type {
   BasicExpression,
+  CollectionRef,
   JoinClause,
   OrderBy,
   OrderByClause,
@@ -86,6 +87,37 @@ export type OrderByOptimizationInfo = {
   joinedFilterSourceId?: string
   /** The joined filter as semi/anti-join hints for the source's loadSubset. */
   relations?: Array<LoadSubsetRelation>
+}
+
+// A subquery that only filters one collection: each of its rows is one of
+// that collection's rows, so a joined filter over it pages the root like one
+// over the collection.
+function filterSubqueryOf(
+  join: JoinClause,
+): (QueryIR & { from: CollectionRef }) | undefined {
+  if (join.from.type !== `queryRef`) return undefined
+  const sub = join.from.query
+  if (
+    sub.from.type !== `collectionRef` ||
+    (sub.join?.length ?? 0) > 0 ||
+    sub.groupBy !== undefined ||
+    sub.having !== undefined ||
+    sub.fnHaving !== undefined ||
+    (sub.fnWhere?.length ?? 0) > 0 ||
+    sub.fnSelect !== undefined ||
+    sub.limit !== undefined ||
+    sub.offset !== undefined ||
+    sub.singleResult ||
+    (sub.where?.some(isResidualWhere) ?? false)
+  ) {
+    return undefined
+  }
+  return sub as QueryIR & { from: CollectionRef }
+}
+
+function joinedFilterSourceOf(join: JoinClause): string | undefined {
+  if (join.from.type === `collectionRef`) return join.from.sourceId
+  return filterSubqueryOf(join)?.from.sourceId
 }
 
 function flattenConjuncts(
@@ -150,12 +182,14 @@ function relationOf(
   rootAlias: string,
   conjunct: BasicExpression,
 ): LoadSubsetRelation | undefined {
-  if (join.from.type !== `collectionRef`) return undefined
   const joinedAlias = join.from.alias
   const aliases = [...getSourceAliasesFromExpression(conjunct)]
   if (aliases.length !== 1 || aliases[0] !== joinedAlias) return undefined
   const key = joinKeyOf(join, rootAlias, joinedAlias)
   if (!key) return undefined
+  if (join.from.type !== `collectionRef`) {
+    return subqueryRelationOf(join, key, conjunct)
+  }
   const collection = join.from.collection
   const collectionId = collection.id
 
@@ -198,6 +232,61 @@ function relationOf(
     collectionId,
     on: key,
     where: new Func(`not`, [where]),
+  }
+}
+
+// An existence check over a filter subquery's projected key: the rows of the
+// subquery's collection that pass its where, related by that key.
+function subqueryRelationOf(
+  join: JoinClause,
+  key: { parent: Array<string>; child: Array<string> },
+  conjunct: BasicExpression,
+): LoadSubsetRelation | undefined {
+  const sub = filterSubqueryOf(join)
+  if (!sub) return undefined
+  let quantifier: `some` | `none` = `none`
+  let check = conjunct
+  if (
+    check.type === `func` &&
+    check.name === `not` &&
+    check.args.length === 1
+  ) {
+    quantifier = `some`
+    check = check.args[0]!
+  }
+  if (
+    check.type !== `func` ||
+    check.name !== `isUndefined` ||
+    check.args.length !== 1 ||
+    check.args[0]?.type !== `ref` ||
+    check.args[0].path.length !== 2 ||
+    check.args[0].path[1] !== key.child[0]
+  ) {
+    return undefined
+  }
+  const childAlias = sub.from.alias
+  const projected = sub.select?.[key.child[0]!]
+  if (
+    !(projected instanceof PropRef) ||
+    projected.path[0] !== childAlias ||
+    projected.path.length < 2
+  ) {
+    return undefined
+  }
+  const wheres: Array<BasicExpression<boolean>> = []
+  for (const where of sub.where ?? []) {
+    const expression = getWhereExpression(where)
+    const aliases = [...getSourceAliasesFromExpression(expression)]
+    if (aliases.some((alias) => alias !== childAlias)) return undefined
+    wheres.push(normalizeExpressionPaths(expression, childAlias))
+  }
+  return {
+    quantifier,
+    collectionId: sub.from.collection.id,
+    on: { parent: key.parent, child: projected.path.slice(1) },
+    ...(wheres.length > 0 && {
+      where: wheres.length === 1 ? wheres[0] : new Func(`and`, wheres),
+    }),
   }
 }
 
@@ -437,9 +526,8 @@ export function processOrderBy(
       const joinedFilterSourceId =
         hasCrossAliasWhere &&
         rawQuery.join?.length === 1 &&
-        rawQuery.join[0]!.type === `left` &&
-        rawQuery.join[0]!.from.type === `collectionRef`
-          ? rawQuery.join[0]!.from.sourceId
+        rawQuery.join[0]!.type === `left`
+          ? joinedFilterSourceOf(rawQuery.join[0]!)
           : undefined
 
       const info: OrderByOptimizationInfo = {
